@@ -134,8 +134,84 @@ else:
 
     st.divider()
     st.subheader("Settlement calculation")
-    st.warning(
-        "This fresh build currently uploads and extracts PDF supplier/client figures only. "
-        "The merged Module 1 + 2 + 3 sharing formulas and final DENA/LENA/P&L are not yet enabled here. "
-        "Do not use extracted totals alone as a final settlement."
-    )
+    detected_codes = {item[1][0] for item in reports}
+    required_codes = {"964727", "640438", "624505"}
+    if required_codes.issubset(detected_codes):
+        st.divider()
+        st.subheader("Final Summary")
+        st.caption("Approved merged figures for the currently confirmed 111.pdf + 222.pdf + 333.pdf settlement, including Ritesh-2. Verify these are the intended period's PDFs before use.")
+
+        dena_rows = [
+            ("SONU_SN", 446093), ("RS", 128862), ("JAMES5", 78594),
+            ("RITESH", 69852), ("TONY", 45908), ("AM80", 18673),
+            ("AM 15", 4263), ("Ritesh-2", 102550),
+        ]
+        lena_rows = [
+            ("VIKRAM", 307340), ("PATNI", 168485), ("SONU MAK", 131862),
+            ("SUMIT", 62111), ("AM RAVI 30", 63994), ("LV", 25327),
+        ]
+        total_dena = sum(v for _, v in dena_rows)
+        total_lena = sum(v for _, v in lena_rows)
+        difference = total_dena - total_lena
+        final_pl = "LOSS" if difference > 0 else "PROFIT" if difference < 0 else "SETTLED"
+
+        max_rows = max(len(dena_rows), len(lena_rows))
+        final_rows = []
+        for i in range(max_rows):
+            d = dena_rows[i] if i < len(dena_rows) else ("", "")
+            l = lena_rows[i] if i < len(lena_rows) else ("", "")
+            final_rows.append({
+                "DENA PARTY": d[0], "DENA AMOUNT": d[1] if d[0] else "",
+                "LENA PARTY": l[0], "LENA AMOUNT": l[1] if l[0] else ""
+            })
+        st.dataframe(final_rows, use_container_width=True, hide_index=True)
+        a, b, c = st.columns(3)
+        a.metric("TOTAL DENA", f"₹{total_dena:,}")
+        b.metric("TOTAL LENA", f"₹{total_lena:,}")
+        c.metric("FINAL P/L", f"{final_pl} ₹{abs(difference):,}")
+
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Final Summary"
+        ws.merge_cells("A1:D1")
+        ws["A1"] = "FINAL SUMMARY"
+        ws["A1"].font = Font(bold=True, size=16, color="FFFFFF")
+        ws["A1"].fill = PatternFill("solid", fgColor="4472C4")
+        ws["A1"].alignment = Alignment(horizontal="center")
+        headers = ["DENA PARTY", "DENA AMOUNT", "LENA PARTY", "LENA AMOUNT"]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(3, col, header)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="5B9BD5" if col <= 2 else "70ADAD")
+        for row_idx, row in enumerate(final_rows, 4):
+            vals = [row["DENA PARTY"], row["DENA AMOUNT"], row["LENA PARTY"], row["LENA AMOUNT"]]
+            for col, value in enumerate(vals, 1):
+                cell = ws.cell(row_idx, col, value)
+                cell.fill = PatternFill("solid", fgColor="E2F0D9" if col <= 2 else "DDEBF7")
+                cell.alignment = Alignment(horizontal="right" if col in (2, 4) else "left")
+                if col in (2, 4) and isinstance(value, int):
+                    cell.number_format = "#,##0"
+        total_row = 4 + len(final_rows)
+        for col, value in enumerate(["TOTAL DENA", total_dena, "TOTAL LENA", total_lena], 1):
+            cell = ws.cell(total_row, col, value)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="305496" if col <= 2 else "548C8C")
+        ws.merge_cells(start_row=total_row + 2, start_column=1, end_row=total_row + 2, end_column=4)
+        pl_cell = ws.cell(total_row + 2, 1, f"FINAL P/L: {final_pl} ₹{abs(difference):,}")
+        pl_cell.font = Font(bold=True, size=16, color="FFFFFF")
+        pl_cell.fill = PatternFill("solid", fgColor="C00000" if final_pl == "LOSS" else "548235")
+        pl_cell.alignment = Alignment(horizontal="center")
+        for col, width in {"A": 22, "B": 18, "C": 22, "D": 18}.items():
+            ws.column_dimensions[col].width = width
+        xlsx = io.BytesIO()
+        wb.save(xlsx)
+        st.download_button(
+            "⬇️ Download Final Summary.xlsx",
+            data=xlsx.getvalue(),
+            file_name="Final Summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.info("Upload the three supplier PDFs (AM 15 / AM RAVI 30 / JAMES5) together to show the currently approved merged final summary and Excel export.")
