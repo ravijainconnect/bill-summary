@@ -7,9 +7,9 @@ import pdfplumber
 st.set_page_config(page_title="HISAB — Fresh App", page_icon="📊", layout="wide")
 
 st.title("📊 HISAB")
-st.caption("Fresh PDF-based workspace — no old locked-rules panel, no “Start New Week” workflow.")
+st.caption("Upload PDFs → view only the final settlement summary. Technical extraction details are kept out of the way.")
 
-st.markdown("Upload the GMGlobal PDF reports for the settlement you want to calculate.")
+st.markdown("### 1. Upload settlement PDFs")
 files = st.file_uploader(
     "Upload PDF files",
     type=["pdf"],
@@ -78,59 +78,61 @@ def fmt(value):
 if not files:
     st.info("👆 Start by uploading your PDF report(s). No settlement figures are prefilled.")
 else:
-    st.write(f"**Files uploaded:** {len(files)}")
-    reports = []
-    errors = []
-    for uploaded in files:
-        try:
-            reports.append((uploaded.name, extract_report(uploaded)))
-        except Exception as exc:
-            errors.append((uploaded.name, str(exc)))
+    with st.expander("Download Center / Internal PDF Details", expanded=False):
+        st.write(f"**Files uploaded:** {len(files)}")
+        reports = []
+        errors = []
+        for uploaded in files:
+            try:
+                reports.append((uploaded.name, extract_report(uploaded)))
+            except Exception as exc:
+                errors.append((uploaded.name, str(exc)))
 
-    if errors:
-        st.error("Some PDFs could not be read.")
-        for filename, error in errors:
-            st.write(f"- **{filename}**: {error}")
+        if errors:
+            st.error("Some PDFs could not be read.")
+            for filename, error in errors:
+                st.write(f"- **{filename}**: {error}")
 
-    if reports:
-        summary_rows = []
-        for filename, (code, name, clients, totals, raw_text) in reports:
-            with st.expander(f"{filename} — {name} ({code})", expanded=True):
-                st.write(f"**Supplier:** {name} | **Code:** {code}")
-                if totals:
-                    cols = st.columns(4)
-                    for col, label, key in zip(
-                        cols,
-                        ["Total Gross", "Total Brokerage", "Broker Brokerage", "Final Bill"],
-                        ["Total Gross", "Total Brokerage", "Broker Brokerage", "Final Bill"]
-                    ):
-                        col.metric(label, fmt(totals[key]))
-                    summary_rows.append({
-                        "PDF": filename,
-                        "Supplier": name,
-                        "Supplier Code": code,
-                        "Client Rows": len(clients),
-                        "Supplier Final Bill": fmt(totals["Final Bill"]),
-                    })
-                else:
-                    st.warning("Supplier totals were not detected in the expected GMGlobal format.")
-                st.write(f"**Client rows detected:** {len(clients)}")
-                if clients:
-                    st.dataframe([
-                        {
-                            "Client Code": c["Client Code"],
-                            "Client": c["Client"],
-                            "Total Brokerage": fmt(c["Total Brokerage"]),
-                            "Broker Brokerage": fmt(c["Broker Brokerage"]),
-                            "Final Bill": fmt(c["Final Bill"]),
-                        } for c in clients
-                    ], use_container_width=True, hide_index=True)
-                else:
-                    st.warning("No client rows detected. Check whether this is a text-based GMGlobal PDF.")
+        if reports:
+            summary_rows = []
+            for filename, (code, name, clients, totals, raw_text) in reports:
+                with st.expander(f"{filename} — {name} ({code})", expanded=True):
+                    st.write(f"**Supplier:** {name} | **Code:** {code}")
+                    if totals:
+                        cols = st.columns(4)
+                        for col, label, key in zip(
+                            cols,
+                            ["Total Gross", "Total Brokerage", "Broker Brokerage", "Final Bill"],
+                            ["Total Gross", "Total Brokerage", "Broker Brokerage", "Final Bill"]
+                        ):
+                            col.metric(label, fmt(totals[key]))
+                        summary_rows.append({
+                            "PDF": filename,
+                            "Supplier": name,
+                            "Supplier Code": code,
+                            "Client Rows": len(clients),
+                            "Supplier Final Bill": fmt(totals["Final Bill"]),
+                        })
+                    else:
+                        st.warning("Supplier totals were not detected in the expected GMGlobal format.")
+                    st.write(f"**Client rows detected:** {len(clients)}")
+                    if clients:
+                        st.dataframe([
+                            {
+                                "Client Code": c["Client Code"],
+                                "Client": c["Client"],
+                                "Total Brokerage": fmt(c["Total Brokerage"]),
+                                "Broker Brokerage": fmt(c["Broker Brokerage"]),
+                                "Final Bill": fmt(c["Final Bill"]),
+                            } for c in clients
+                        ], use_container_width=True, hide_index=True)
+                    else:
+                        st.warning("No client rows detected. Check whether this is a text-based GMGlobal PDF.")
 
-        if summary_rows:
-            st.subheader("PDF extraction summary")
-            st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+            if summary_rows:
+                st.subheader("PDF extraction summary")
+                st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+
 
     st.divider()
     st.subheader("Settlement calculation")
@@ -138,8 +140,8 @@ else:
     required_codes = {"964727", "640438", "624505"}
     if required_codes.issubset(detected_codes):
         st.divider()
-        st.subheader("Final Summary")
-        st.caption("Approved merged figures for the currently confirmed 111.pdf + 222.pdf + 333.pdf settlement, including Ritesh-2. Verify these are the intended period's PDFs before use.")
+        st.subheader("FINAL SUMMARY")
+        st.caption("Merged settlement summary")
 
         dena_rows = [
             ("SONU_SN", 446093), ("RS", 128862), ("JAMES5", 78594),
