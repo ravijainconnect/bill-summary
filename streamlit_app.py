@@ -1,219 +1,179 @@
 import io
+import json
 import re
+import base64
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+
+import requests
 import streamlit as st
 import pdfplumber
+from openpyxl import Workbook
 
-st.set_page_config(page_title="HISAB — Fresh App", page_icon="📊", layout="wide")
+st.set_page_config(page_title="HISAB Version 2.0", page_icon="📊", layout="wide")
+
+OWNER = "ravijainconnect"
+REPO = "bill-summary"
+BRANCH = "version-2.0"
+RULES_PATH = "saved_rules.json"
 
 st.title("📊 HISAB")
-st.caption("Upload PDFs → view only the final settlement summary. Technical extraction details are kept out of the way.")
+st.caption("Version 2.0 — separate development branch. Version 1.0 / main is not modified.")
 
-st.markdown("### 1. Upload settlement PDFs")
-files = st.file_uploader(
-    "Upload PDF files",
-    type=["pdf"],
-    accept_multiple_files=True,
-    help="Select one or more supplier PDF reports."
-)
+# Version selector defaults to latest. V1 is intentionally not emulated in this V2 branch.
+version = st.radio("Select App Version", ["2.0 (Latest)", "1.0 (Existing)"], index=0, horizontal=True)
+if version.startswith("1.0"):
+    st.warning("Version 1.0 is a separate existing deployment. Open that deployment to use it; this Version 2.0 branch does not overwrite it.")
+    st.stop()
 
-def parse_amount(value):
-    value = value.strip().replace(",", "")
-    if value.startswith("(") and value.endswith(")"):
-        value = "-" + value[1:-1]
-    return Decimal(value)
+st.subheader("1. Upload settlement PDFs")
+files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
 
-def extract_report(uploaded):
-    data = uploaded.getvalue()
-    text_parts = []
-    with pdfplumber.open(io.BytesIO(data)) as pdf:
-        for page in pdf.pages:
-            text_parts.append(page.extract_text(x_tolerance=2, y_tolerance=3) or "")
-    text = "\n".join(text_parts)
+def gh_headers():
+    token = st.secrets.get("GITHUB_TOKEN", "")
+    if not token:
+        return None
+    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
 
-    supplier_match = re.search(r'^\s*\((\d{6})\)\s*(.+?)\s*$', text, re.M)
-    supplier_code = supplier_match.group(1) if supplier_match else "Unknown"
-    supplier_name = supplier_match.group(2).strip() if supplier_match else "Supplier not detected"
+def load_rules():
+    headers = gh_headers()
+    if not headers:
+        return [], None, "GitHub persistent storage is not configured. Add GITHUB_TOKEN to Streamlit secrets."
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{RULES_PATH}?ref={BRANCH}"
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 404:
+            return [], None, None
+        response.raise_for_status()
+        payload = response.json()
+        raw = base64.b64decode(payload["content"]).decode("utf-8")
+        return json.loads(raw), payload["sha"], None
+    except Exception as exc:
+        return [], None, f"Could not load saved rules: {exc}"
 
-    client_pattern = re.compile(
-        r'^\s*\((\d{6})\)\s*(.+?)\s*$.*?'
-        r'Total Brokerage:\s*([\-\d,]+\.\d+)\s+'
-        r'Broker Brokerage:\s*([\-\d,]+\.\d+)\s+'
-        r'Final Bill Amt\s*:\s*([\-\d,]+\.\d+)',
-        re.M | re.S
-    )
-    clients = []
-    for m in client_pattern.finditer(text):
-        code, name, brokerage, broker_brokerage, final_bill = m.groups()
-        if code == supplier_code and name.strip() == supplier_name:
-            continue
-        clients.append({
-            "Client Code": code,
-            "Client": name.strip(),
-            "Total Brokerage": parse_amount(brokerage),
-            "Broker Brokerage": parse_amount(broker_brokerage),
-            "Final Bill": parse_amount(final_bill),
-        })
+def save_rules(rules, sha):
+    headers = gh_headers()
+    if not headers:
+        return False, "Permanent saving is unavailable until GITHUB_TOKEN is configured in Streamlit secrets."
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{RULES_PATH}"
+    body = {
+        "message": "Save HISAB Version 2.0 client sharing rule",
+        "content": base64.b64encode(json.dumps(rules, ensure_ascii=False, indent=2).encode("utf-8")).decode("ascii"),
+        "branch": BRANCH,
+    }
+    if sha:
+        body["sha"] = sha
+    try:
+        response = requests.put(url, headers=headers, json=body, timeout=20)
+        response.raise_for_status()
+        return True, "Rule saved permanently to the Version 2.0 branch."
+    except Exception as exc:
+        return False, f"Save failed: {exc}"
 
-    total_match = re.search(
-        r'Total Gross:\s*([\-\d,]+\.\d+)\s+'
-        r'Total Brokerage:\s*([\-\d,]+\.\d+)\s+'
-        r'Broker Brokerage:\s*([\-\d,]+\.\d+)\s+'
-        r'Final Bill Amt\s*:\s*([\-\d,]+\.\d+)',
-        text, re.S
-    )
-    totals = None
-    if total_match:
-        totals = {
-            "Total Gross": parse_amount(total_match.group(1)),
-            "Total Brokerage": parse_amount(total_match.group(2)),
-            "Broker Brokerage": parse_amount(total_match.group(3)),
-            "Final Bill": parse_amount(total_match.group(4)),
-        }
-    return supplier_code, supplier_name, clients, totals, text
-
-def fmt(value):
-    return f"₹{value.quantize(Decimal('1'), rounding=ROUND_HALF_UP):,}"
-
-if not files:
-    st.info("👆 Start by uploading your PDF report(s). No settlement figures are prefilled.")
+rules, rules_sha, rules_error = load_rules()
+if rules_error:
+    st.warning(rules_error)
 else:
-    with st.expander("Download Center / Internal PDF Details", expanded=False):
-        st.write(f"**Files uploaded:** {len(files)}")
-        reports = []
-        errors = []
-        for uploaded in files:
-            try:
-                reports.append((uploaded.name, extract_report(uploaded)))
-            except Exception as exc:
-                errors.append((uploaded.name, str(exc)))
+    st.success(f"Saved rules loaded: {len(rules)}")
 
-        if errors:
-            st.error("Some PDFs could not be read.")
-            for filename, error in errors:
-                st.write(f"- **{filename}**: {error}")
-
-        if reports:
-            summary_rows = []
-            for filename, (code, name, clients, totals, raw_text) in reports:
-                with st.expander(f"{filename} — {name} ({code})", expanded=True):
-                    st.write(f"**Supplier:** {name} | **Code:** {code}")
-                    if totals:
-                        cols = st.columns(4)
-                        for col, label, key in zip(
-                            cols,
-                            ["Total Gross", "Total Brokerage", "Broker Brokerage", "Final Bill"],
-                            ["Total Gross", "Total Brokerage", "Broker Brokerage", "Final Bill"]
-                        ):
-                            col.metric(label, fmt(totals[key]))
-                        summary_rows.append({
-                            "PDF": filename,
-                            "Supplier": name,
-                            "Supplier Code": code,
-                            "Client Rows": len(clients),
-                            "Supplier Final Bill": fmt(totals["Final Bill"]),
-                        })
-                    else:
-                        st.warning("Supplier totals were not detected in the expected GMGlobal format.")
-                    st.write(f"**Client rows detected:** {len(clients)}")
-                    if clients:
-                        st.dataframe([
-                            {
-                                "Client Code": c["Client Code"],
-                                "Client": c["Client"],
-                                "Total Brokerage": fmt(c["Total Brokerage"]),
-                                "Broker Brokerage": fmt(c["Broker Brokerage"]),
-                                "Final Bill": fmt(c["Final Bill"]),
-                            } for c in clients
-                        ], use_container_width=True, hide_index=True)
-                    else:
-                        st.warning("No client rows detected. Check whether this is a text-based GMGlobal PDF.")
-
-            if summary_rows:
-                st.subheader("PDF extraction summary")
-                st.dataframe(summary_rows, use_container_width=True, hide_index=True)
-
-
-    st.divider()
-    st.subheader("Settlement calculation")
-    detected_codes = {item[1][0] for item in reports}
-    required_codes = {"964727", "640438", "624505"}
-    if required_codes.issubset(detected_codes):
-        st.divider()
-        st.subheader("FINAL SUMMARY")
-        st.caption("Merged settlement summary")
-
-        dena_rows = [
-            ("SONU_SN", 446093), ("RS", 128862), ("JAMES5", 78594),
-            ("RITESH", 69852), ("TONY", 45908), ("AM80", 18673),
-            ("AM 15", 4263), ("Ritesh-2", 102550),
-        ]
-        lena_rows = [
-            ("VIKRAM", 307340), ("PATNI", 168485), ("SONU MAK", 131862),
-            ("SUMIT", 62111), ("AM RAVI 30", 63994), ("LV", 25327),
-        ]
-        total_dena = sum(v for _, v in dena_rows)
-        total_lena = sum(v for _, v in lena_rows)
-        difference = total_dena - total_lena
-        final_pl = "LOSS" if difference > 0 else "PROFIT" if difference < 0 else "SETTLED"
-
-        max_rows = max(len(dena_rows), len(lena_rows))
-        final_rows = []
-        for i in range(max_rows):
-            d = dena_rows[i] if i < len(dena_rows) else ("", "")
-            l = lena_rows[i] if i < len(lena_rows) else ("", "")
-            final_rows.append({
-                "DENA PARTY": d[0], "DENA AMOUNT": d[1] if d[0] else "",
-                "LENA PARTY": l[0], "LENA AMOUNT": l[1] if l[0] else ""
-            })
-        st.dataframe(final_rows, use_container_width=True, hide_index=True)
-        a, b, c = st.columns(3)
-        a.metric("TOTAL DENA", f"₹{total_dena:,}")
-        b.metric("TOTAL LENA", f"₹{total_lena:,}")
-        c.metric("FINAL P/L", f"{final_pl} ₹{abs(difference):,}")
-
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Final Summary"
-        ws.merge_cells("A1:D1")
-        ws["A1"] = "FINAL SUMMARY"
-        ws["A1"].font = Font(bold=True, size=16, color="FFFFFF")
-        ws["A1"].fill = PatternFill("solid", fgColor="4472C4")
-        ws["A1"].alignment = Alignment(horizontal="center")
-        headers = ["DENA PARTY", "DENA AMOUNT", "LENA PARTY", "LENA AMOUNT"]
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(3, col, header)
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="5B9BD5" if col <= 2 else "70ADAD")
-        for row_idx, row in enumerate(final_rows, 4):
-            vals = [row["DENA PARTY"], row["DENA AMOUNT"], row["LENA PARTY"], row["LENA AMOUNT"]]
-            for col, value in enumerate(vals, 1):
-                cell = ws.cell(row_idx, col, value)
-                cell.fill = PatternFill("solid", fgColor="E2F0D9" if col <= 2 else "DDEBF7")
-                cell.alignment = Alignment(horizontal="right" if col in (2, 4) else "left")
-                if col in (2, 4) and isinstance(value, int):
-                    cell.number_format = "#,##0"
-        total_row = 4 + len(final_rows)
-        for col, value in enumerate(["TOTAL DENA", total_dena, "TOTAL LENA", total_lena], 1):
-            cell = ws.cell(total_row, col, value)
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="305496" if col <= 2 else "548C8C")
-        ws.merge_cells(start_row=total_row + 2, start_column=1, end_row=total_row + 2, end_column=4)
-        pl_cell = ws.cell(total_row + 2, 1, f"FINAL P/L: {final_pl} ₹{abs(difference):,}")
-        pl_cell.font = Font(bold=True, size=16, color="FFFFFF")
-        pl_cell.fill = PatternFill("solid", fgColor="C00000" if final_pl == "LOSS" else "548235")
-        pl_cell.alignment = Alignment(horizontal="center")
-        for col, width in {"A": 22, "B": 18, "C": 22, "D": 18}.items():
-            ws.column_dimensions[col].width = width
-        xlsx = io.BytesIO()
-        wb.save(xlsx)
-        st.download_button(
-            "⬇️ Download Final Summary.xlsx",
-            data=xlsx.getvalue(),
-            file_name="Final Summary.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+detected_names = []
+if files:
+    for uploaded in files:
+        try:
+            with pdfplumber.open(io.BytesIO(uploaded.getvalue())) as pdf:
+                txt = "\n".join(p.extract_text(x_tolerance=2, y_tolerance=3) or "" for p in pdf.pages)
+            for code, name in re.findall(r"\((\d{6})\)\s*([^\n]+)", txt):
+                candidate = name.strip()
+                if candidate and candidate not in detected_names:
+                    detected_names.append(candidate)
+        except Exception:
+            pass
+    st.caption(f"PDF files selected: {len(files)}")
+    if detected_names:
+        st.write("Names detected from uploaded PDFs (review before creating a rule):")
+        st.write(", ".join(detected_names))
     else:
-        st.info("Upload the three supplier PDFs (AM 15 / AM RAVI 30 / JAMES5) together to show the currently approved merged final summary and Excel export.")
+        st.info("No client names detected in the uploaded PDFs yet. PDF parser needs validation against the actual report format.")
+
+st.divider()
+st.subheader("New Client Module")
+st.caption("Unknown client workflow: review the client, define the rule, save it, then continue calculation. Saving requires configured GitHub credentials.")
+
+# Point 1: auto-detected and locked
+detected_client = detected_names[0] if detected_names else ""
+st.markdown("**1. FOUND NEW CLIENT**")
+st.text_input("Auto-detected client (locked)", value=detected_client or "Waiting for PDF detection", disabled=True)
+
+# All known clients are dynamically sourced from saved rules; no hard-coded full list.
+client_names = sorted({str(r.get("first_person", "")) for r in rules if r.get("first_person")} |
+                      {str(r.get("second_person", "")) for r in rules if r.get("second_person")})
+st.markdown("**2. 1ST LENDEN PERSON**")
+client_choice = st.selectbox("Select from saved client/person names", [""] + client_names + ["＋ ADD NEW"], key="first_person_choice")
+first_person = st.text_input("Enter new first lenden person name", key="first_person_new") if client_choice == "＋ ADD NEW" else client_choice
+
+st.markdown("**3. 1ST LENDEN PERSON SHARING**")
+share1 = st.number_input("Percentage (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.25, format="%.2f", key="share1")
+st.markdown("**4. 1ST LENDEN PERSON SHARING BASIS**")
+basis1 = st.radio("First person basis", ["Final Bill", "Brokerage", "Final Bill + Return Brokerage"], key="basis1", horizontal=False)
+st.markdown("**5. 1ST LENDEN PERSON BROKER BROKERAGE SHARING**")
+broker1 = st.number_input("Percentage (%) ", min_value=0.0, max_value=100.0, value=0.0, step=0.25, format="%.2f", key="broker1")
+st.markdown("**6. 1ST LENDEN PERSON TOTAL BROKERAGE SHARING**")
+total1 = st.number_input("Total brokerage sharing (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.25, format="%.2f", key="total1")
+
+st.markdown("**7. 2ND LENDEN PERSON**")
+second = st.radio("Does a second lenden person exist?", ["NO", "YES"], index=0, horizontal=True, key="second")
+if second == "YES":
+    st.markdown("**8. 2ND LENDEN PERSON SHARING BASIS**")
+    basis2 = st.radio("Second person basis", ["Final Bill", "Brokerage", "Final Bill + Return Brokerage"], key="basis2")
+    st.markdown("**9. 2ND LENDEN PERSON SHARING**")
+    share2 = st.number_input("Second person sharing (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.25, format="%.2f", key="share2")
+    st.markdown("**10. 2ND LENDEN PERSON BROKER BROKERAGE SHARING**")
+    broker2 = st.number_input("Second person broker brokerage sharing (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.25, format="%.2f", key="broker2")
+    st.markdown("**11. 2ND LENDEN PERSON TOTAL BROKERAGE SHARING**")
+    total2 = st.number_input("Second person total brokerage sharing (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.25, format="%.2f", key="total2")
+else:
+    basis2, share2, broker2, total2 = "", 0.0, 0.0, 0.0
+
+st.markdown("**Rule type**")
+rule_type = st.radio("Sharing behavior", ["Additional sharing", "Replacement sharing"], horizontal=False)
+if st.button("Save Rule Permanently", type="primary", use_container_width=True):
+    if not first_person:
+        st.error("Select or enter the 1st Lenden Person before saving.")
+    elif not detected_client:
+        st.error("Upload a PDF and ensure the new client is detected before saving this rule.")
+    else:
+        new_rule = {
+            "detected_client": detected_client,
+            "first_person": first_person,
+            "first_sharing_pct": share1,
+            "first_basis": basis1,
+            "first_broker_brokerage_sharing_pct": broker1,
+            "first_total_brokerage_sharing_pct": total1,
+            "has_second_person": second,
+            "second_basis": basis2,
+            "second_sharing_pct": share2,
+            "second_broker_brokerage_sharing_pct": broker2,
+            "second_total_brokerage_sharing_pct": total2,
+            "rule_type": rule_type,
+            "saved_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        rules.append(new_rule)
+        ok, message = save_rules(rules, rules_sha)
+        if ok:
+            st.success(message)
+            st.rerun()
+        else:
+            rules.pop()
+            st.error(message)
+
+st.divider()
+st.subheader("Saved Rules")
+if rules:
+    st.dataframe(rules, use_container_width=True, hide_index=True)
+    st.download_button("Download saved rules backup (JSON)", data=json.dumps(rules, ensure_ascii=False, indent=2), file_name="hisab_v2_saved_rules_backup.json", mime="application/json")
+else:
+    st.info("No rules saved yet.")
+
+st.divider()
+st.subheader("Settlement Summary")
+st.info("The final merged calculation is not enabled in this build yet. PDF extraction and all 11 rule fields need validation against your real PDFs and saved Module 1–4 / Merge rules before the summary can safely calculate. No static figures are presented as live calculations.")
